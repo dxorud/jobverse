@@ -1,17 +1,27 @@
+// services/interviewFlow.js
+const axios = require('axios');
 const { connectMongo, Session, Message } = require('./db');
 const { ensureSchema, upsert, findSimilarQuestions } = require('./vector');
-// 질문 생성은 기존대로 (Dify/에이전트 등 내부 구현 유지)
-const { askAgentByRole, askOpenAIQuickSummary } = require('./ai');
+// 질문 생성은 Dify 에이전트 사용
+const { askAgentByRole } = require('./difyInterview');
 
 /* ===================== ENV / CONST ===================== */
-// .env에서 rounds/ROUNDS 모두 허용, 숫자 아님/음수면 기본값(5) 사용
 const _roundsRaw = (process.env.ROUNDS ?? process.env.round ?? 5);
 const ROUNDS = Math.max(0, Number(_roundsRaw)) || 5;
 
 const SIM_THRESHOLD = Number(process.env.SIM_THRESHOLD || 0.86);
 
 const ROLES = ['A', 'B', 'C'];
-const MAX_TRANSCRIPT_FOR_SUMMARY = 6000;
+
+// OpenAI 요약 모델 설정 (ANALYSIS_MODEL > OPENAI_SUMMARY_MODEL > 기본값)
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const SUMMARY_MODEL =
+  process.env.ANALYSIS_MODEL ||
+  process.env.OPENAI_SUMMARY_MODEL ||
+  'gpt-4o-mini';
+
+// 안전치(문자 수). 이보다 길면 부분 요약 → 병합
+const HARD_LIMIT = 9000;
 
 /* ===================== UTILS ===================== */
 const pickNext = (prev) => {
@@ -27,27 +37,145 @@ async function getSessionMessages(sessionId) {
 function toTranscript(messages) {
   return messages
     .map((m) => {
-      const who = m.speaker === 'interviewer' ? `Q(${m.interviewerRole || ''})` : 'A';
+      const who = m.speaker === 'interviewer'
+        ? `Q${m.turn || ''}(${m.interviewerRole || ''})`
+        : `A${m.turn || ''}`;
       return `${who}: ${m.text}`;
     })
     .join('\n');
 }
 
+function splitByLength(s, max = 8000) {
+  const out = [];
+  for (let i = 0; i < s.length; i += max) out.push(s.slice(i, i + max));
+  return out;
+}
+
+function coerceJsonAnswer(raw) {
+  if (!raw) return { summary: '', bullets: [] };
+  // 1) 순수 JSON 시도
+  try {
+    const j = JSON.parse(raw);
+    if (j && (j.summary || j.bullets)) {
+      return {
+        summary: String(j.summary || '').trim(),
+        bullets: Array.isArray(j.bullets) ? j.bullets.map(String) : [],
+      };
+    }
+  } catch {}
+  // 2) 본문에서 JSON 블록 추출
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (m) {
+    try {
+      const j = JSON.parse(m[0]);
+      return {
+        summary: String(j.summary || '').trim(),
+        bullets: Array.isArray(j.bullets) ? j.bullets.map(String) : [],
+      };
+    } catch {}
+  }
+  // 3) fallback: 간이 파싱
+  const lines = raw.split('\n').map((s) => s.trim()).filter(Boolean);
+  const bullets = lines
+    .filter((l) => /^[\-•*]/.test(l))
+    .map((l) => l.replace(/^[\-•*]\s?/, '').trim())
+    .slice(0, 6);
+  const summary = lines.find((l) => !/^[\-•*]/.test(l)) || raw.slice(0, 600);
+  return { summary, bullets };
+}
+
+async function callOpenAI(messages, { temperature = 0.3 } = {}) {
+  if (!OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY is not set (요약 생성에 필요)');
+  }
+  const { data } = await axios.post(
+    'https://api.openai.com/v1/chat/completions',
+    { model: SUMMARY_MODEL, messages, temperature },
+    {
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: 60_000,
+    }
+  );
+  return (data?.choices?.[0]?.message?.content || '').trim();
+}
+
 /* ===================== 짧은 분석(요약) ===================== */
 /**
- * 면접 종료 후 큰 모달에서 보여줄 "짧은 분석" 생성
  * 반환: { summary: string, bullets: string[] }
- * 저장은 하지 않음(요청마다 새로 생성)
+ * - MongoDB에서 대화 전체를 읽어 transcript 구성
+ * - OpenAI로 JSON 요약 요청
  */
 async function generateQuickSummary(sessionId) {
-  const msgs = await getSessionMessages(sessionId);
-  if (!msgs.length) return { summary: '', bullets: [] };
+  await connectMongo();
 
-  const transcript = toTranscript(msgs).slice(-MAX_TRANSCRIPT_FOR_SUMMARY);
+  const sess = await Session.findById(sessionId).lean();
+  if (!sess) return { summary: '세션을 찾을 수 없습니다.', bullets: [] };
+
+  const msgs = await getSessionMessages(sessionId);
+  if (!msgs.length) return { summary: '대화 기록이 없습니다.', bullets: [] };
+
+  const transcript = toTranscript(msgs);
+  const userName = sess.userName || '지원자';
+  const jobRole = sess.jobRole || '';
+
+  const system = [
+    '당신은 한국어 면접 평가 보조자입니다.',
+    '아래 면접 대화를 읽고:',
+    '1) 5~7문장으로 전반적인 수행 요약(summary)',
+    '2) 4~6개의 핵심 관찰 포인트(bullets) — 강점과 보완점을 균형 있게',
+    '반드시 다음 **JSON만** 반환하세요 (추가 텍스트 금지):',
+    '{ "summary": "...", "bullets": ["...","..."] }',
+  ].join('\n');
+
+  const prefix = [`지원자: ${userName}`, `직무: ${jobRole}`, '', '--- 대화 기록 ---'].join('\n');
 
   try {
-    // OpenAI 직접 호출 (services/ai.js의 askOpenAIQuickSummary)
-    return await askOpenAIQuickSummary({ transcript });
+    // 길면 부분 요약 → 병합
+    if (transcript.length > HARD_LIMIT) {
+      const chunks = splitByLength(transcript, 8000);
+      const parts = [];
+      for (let i = 0; i < chunks.length; i++) {
+        const raw = await callOpenAI([
+          { role: 'system', content: system },
+          { role: 'user', content: `${prefix}\n(부분 ${i + 1}/${chunks.length})\n${chunks[i]}` },
+        ]);
+        parts.push(coerceJsonAnswer(raw));
+      }
+      const fuseSystem = [
+        '여러 부분 요약을 받아 최종 요약을 만듭니다.',
+        'JSON만 반환하세요: { "summary": "...", "bullets": ["..."] }',
+      ].join('\n');
+      const fuseUser = [
+        `지원자: ${userName}`,
+        `직무: ${jobRole}`,
+        '',
+        '--- 부분 요약들(JSON) ---',
+        JSON.stringify(parts, null, 2),
+      ].join('\n');
+      const fusedRaw = await callOpenAI([
+        { role: 'system', content: fuseSystem },
+        { role: 'user', content: fuseUser },
+      ]);
+      const fused = coerceJsonAnswer(fusedRaw);
+      return {
+        summary: fused.summary || '(요약 없음)',
+        bullets: Array.isArray(fused.bullets) ? fused.bullets.filter(Boolean) : [],
+      };
+    }
+
+    // 단일 호출
+    const raw = await callOpenAI([
+      { role: 'system', content: system },
+      { role: 'user', content: `${prefix}\n${transcript}` },
+    ]);
+    const parsed = coerceJsonAnswer(raw);
+    return {
+      summary: parsed.summary || '(요약 없음)',
+      bullets: Array.isArray(parsed.bullets) ? parsed.bullets.filter(Boolean) : [],
+    };
   } catch (e) {
     console.error('[generateQuickSummary] OpenAI error:', e?.message || e);
     return { summary: '요약을 생성하지 못했습니다.', bullets: [] };

@@ -1,4 +1,3 @@
-// Chatbot.jsx
 import React, { useState, useEffect, useRef } from 'react';
 import './Chatbot.css';
 import ReactMarkdown from 'react-markdown';
@@ -21,7 +20,7 @@ const Chatbot = () => {
   const chatEndRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
-  const lastSTTRef = useRef(''); // 마지막 STT 결과 저장
+  const lastSTTRef = useRef('');
 
   useEffect(() => {
     setMessages([{ role: 'bot', text: '궁금한 게 있으면 뭐든지 물어보세요!😊' }]);
@@ -32,9 +31,10 @@ const Chatbot = () => {
   }, [messages]);
 
   const handleSend = async () => {
-    if (!input.trim()) return;
+    const q = input.trim();
+    if (!q) return;
 
-    const userMessage = { role: 'user', text: input };
+    const userMessage = { role: 'user', text: q };
     setMessages((prev) => [...prev, userMessage]);
     setInput('');
     setLoading(true);
@@ -43,21 +43,31 @@ const Chatbot = () => {
       const chatRes = await fetch(`${API_BASE}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user: 'demo-user', query: userMessage.text }),
+        body: JSON.stringify({ user: 'demo-user', query: q, stream: false }),
       });
 
-      if (!chatRes.ok) throw new Error(`Chat API ${chatRes.status}`);
+      if (!chatRes.ok) {
+        const errText = await chatRes.text().catch(() => '');
+        throw new Error(`Chat API ${chatRes.status}${errText ? ` - ${errText}` : ''}`);
+      }
+
       const chatData = await chatRes.json();
-      setMessages((prev) => [...prev, { role: 'bot', text: chatData.answer }]);
+      const answer =
+        chatData?.answer ??
+        chatData?.data ??
+        (typeof chatData === 'string' ? chatData : '');
+
+      setMessages((prev) => [...prev, { role: 'bot', text: answer || '(빈 응답)' }]);
     } catch (err) {
-      console.error(err);
-      alert("❌ 챗봇 호출 실패: " + err.message);
+      setMessages((prev) => [
+        ...prev,
+        { role: 'bot', text: `챗봇 호출 실패: ${err.message}` },
+      ]);
     } finally {
       setLoading(false);
     }
   };
 
-  // [수정됨] 한글 입력기(IME) 문제를 해결하기 위해 e.nativeEvent.isComposing 확인
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
@@ -92,12 +102,14 @@ const Chatbot = () => {
 
           const newText = (data.text || '').trim();
           if (newText && newText !== lastSTTRef.current) {
-            // [개선됨] 기존 텍스트를 덮어쓰지 않고 뒤에 이어붙이도록 수정
-            setInput(prev => (prev ? prev + ' ' : '') + newText);
+            setInput((prev) => (prev ? prev + ' ' : '') + newText);
             lastSTTRef.current = newText;
           }
         } catch (err) {
-          alert('❌ 음성 인식 실패: ' + err.message);
+          setMessages((prev) => [
+            ...prev,
+            { role: 'bot', text: `음성 인식 실패: ${err.message}` },
+          ]);
         }
       };
 
@@ -105,12 +117,15 @@ const Chatbot = () => {
       mediaRecorder.start();
       setRecording(true);
     } catch (err) {
-      alert('🎤 마이크 접근 실패: ' + err.message);
+      setMessages((prev) => [
+        ...prev,
+        { role: 'bot', text: `마이크 접근 실패: ${err.message}` },
+      ]);
     }
   };
 
   const playAudio = async (text) => {
-    if (ttsDisabled) return;
+    if (ttsDisabled || !text?.trim()) return;
 
     if (audioRef.current && currentlyPlayingText === text) {
       if (!audioRef.current.paused) {
@@ -133,9 +148,15 @@ const Chatbot = () => {
       if (!res.ok) {
         if ([401, 403, 429].includes(res.status)) {
           setTtsDisabled(true);
-          console.warn('TTS 비활성화(권한/크레딧 이슈). 텍스트만 진행합니다.');
+          setMessages((prev) => [
+            ...prev,
+            { role: 'bot', text: '현재 음성 출력이 비활성화되었습니다. 텍스트로만 진행할게요.' },
+          ]);
         } else {
-          console.warn('TTS 실패:', res.status);
+          setMessages((prev) => [
+            ...prev,
+            { role: 'bot', text: `TTS 실패: ${res.status}` },
+          ]);
         }
         return;
       }
@@ -155,7 +176,10 @@ const Chatbot = () => {
       };
       await audio.play();
     } catch (err) {
-      console.error('❌ 음성 출력 실패:', err);
+      setMessages((prev) => [
+        ...prev,
+        { role: 'bot', text: `음성 출력 실패: ${err.message}` },
+      ]);
     }
   };
 
@@ -238,7 +262,9 @@ const Chatbot = () => {
           >
             🎤
           </button>
-          <button className="send-btn" onClick={handleSend}>전송</button>
+          <button className="send-btn" onClick={handleSend} disabled={loading}>
+            전송
+          </button>
         </div>
       </div>
     </div>

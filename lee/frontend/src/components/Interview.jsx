@@ -23,9 +23,8 @@ const Interview = () => {
   const [firstAnswer, setFirstAnswer] = useState('');
   const [sessionId, setSessionId] = useState(null);
 
-  // 프론트(8501) → 백엔드(3000)
-  const BASE_URL = import.meta.env.VITE_API_BASE || 'http://localhost:3000/interview';
-  const SUMMARY_BASE = BASE_URL.replace(/\/+interview\/?$/, '');
+  /* ===================== API BASE ===================== */
+  const INTERVIEW_API_BASE = import.meta.env.VITE_INTERVIEW_API_BASE || '/interview-api';
 
   const interviewerIds = ['C', 'A', 'B'];
   const prevInterviewerRef = useRef(null);
@@ -57,8 +56,7 @@ const Interview = () => {
     const res = await fetch(url, options);
     if (!res.ok) {
       const t = await res.text().catch(() => '');
-      console.error('Fetch fail:', res.status, url, t);
-      throw new Error(`HTTP ${res.status} on ${url}`);
+      throw new Error(`HTTP ${res.status} on ${url}${t ? ` - ${t}` : ''}`);
     }
     return res;
   };
@@ -68,7 +66,7 @@ const Interview = () => {
     const { text, role } = ttsQueue.current.shift();
     isSpeaking.current = true;
     try {
-      const res = await safeFetch(`${BASE_URL}/tts`, {
+      const res = await safeFetch(`${INTERVIEW_API_BASE}/tts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, role })
@@ -88,17 +86,15 @@ const Interview = () => {
         playNextInQueue();
       };
 
-      audio.play().catch(console.warn);
-    } catch (err) {
-      console.error('🔈 TTS 재생 오류:', err);
+      audio.play().catch(() => {});
+    } catch (_err) {
       isSpeaking.current = false;
     }
   };
 
-  // 서버 스트리밍 수신
   const streamChatResponse = async (payload) => {
     try {
-      const res = await safeFetch(`${BASE_URL}/chat`, {
+      const res = await safeFetch(`${INTERVIEW_API_BASE}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -172,22 +168,18 @@ const Interview = () => {
       }
 
       return { ended: endedByServer, text: fullText };
-    } catch (err) {
-      console.error('스트리밍 실패:', err.message);
+    } catch (_err) {
       return { ended: false, text: '' };
     }
   };
 
-  // 첫 질문: 인자로 받은 값 우선 사용 (UI 변경 없음)
   const pickFirstInterviewer = async (nameParam, jobParam) => {
     const name = nameParam ?? username;
     const role = jobParam ?? jobRole;
 
-    console.log('[FRONT]/start payload =', { userName: name, jobRole: role });
-    const res = await safeFetch(`${BASE_URL}/start`, {
+    const res = await safeFetch(`${INTERVIEW_API_BASE}/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      // 🔧 중요: 백엔드 스키마와 키 통일
       body: JSON.stringify({ userName: name, jobRole: role })
     });
     const data = await res.json();
@@ -207,7 +199,6 @@ const Interview = () => {
     setRound(1);
   };
 
-  // 사용자 입력 전송
   const handleUserSubmit = async () => {
     if (!input.trim()) return;
 
@@ -218,7 +209,6 @@ const Interview = () => {
     if (round === 1) setFirstAnswer(userText);
 
     if (!sessionId) {
-      console.warn('세션이 없습니다. 먼저 시작을 진행하세요.');
       return;
     }
 
@@ -237,7 +227,6 @@ const Interview = () => {
     setRound(prev => prev + 1);
   };
 
-  // 음성 녹음(STT)
   const handleStartRecording = async () => {
     if (isRecording && mediaRecorder) {
       mediaRecorder.stop();
@@ -258,14 +247,14 @@ const Interview = () => {
       formData.append('user', username);
 
       try {
-        const res = await safeFetch(`${BASE_URL}/stt`, {
+        const res = await safeFetch(`${INTERVIEW_API_BASE}/stt`, {
           method: 'POST',
           body: formData
         });
         const data = await res.json();
         if (data.text) setInput(data.text);
-      } catch (err) {
-        console.error('STT 오류:', err);
+      } catch (_err) {
+        // no-op
       }
     };
 
@@ -276,7 +265,6 @@ const Interview = () => {
     setUsername(name);
     setJobRole(job);
     setShowModal(false);
-    // ⬇️ DOM 구조 변경 없이, 즉시 인자 사용
     pickFirstInterviewer(name, job);
   };
 
@@ -307,7 +295,7 @@ const Interview = () => {
         sessionId={sessionId}
         onClose={() => setShowSummary(false)}
         onMore={() => {}}
-        baseUrl={SUMMARY_BASE}
+        baseUrl={INTERVIEW_API_BASE} 
       />
 
       <div className="interviewers">
@@ -340,7 +328,7 @@ const Interview = () => {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleUserSubmit()}
           />
-          <button onClick={handleStartRecording}>{isRecording ? '🛑' : '🎤'}</button>
+        <button onClick={handleStartRecording}>{isRecording ? '🛑' : '🎤'}</button>
           <button onClick={handleUserSubmit}>📤</button>
         </div>
       </div>

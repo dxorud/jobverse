@@ -5,26 +5,32 @@ const axios = require('axios');
 
 const { connectMongo, Session, Message } = require('../services/db');
 const { ensureSchema, upsert, findSimilarQuestions } = require('../services/vector');
-const { textToSpeech, speechToText } = require('../services/ai');
-const { generateQuickSummary, generateFullReport } = require('../services/interviewFlow');
+const { textToSpeech, speechToText } = require('../services/elevenlabs');
+const { generateQuickSummary /*, generateFullReport */ } = require('../services/interviewFlow');
 
-// ---- ENV ----
-const DIFY_API_URL = process.env.DIFY_API_URL;
-const DIFY_AGENT_A_API_KEY = process.env.DIFY_AGENT_A_API_KEY;
-const DIFY_AGENT_B_API_KEY = process.env.DIFY_AGENT_B_API_KEY;
-const DIFY_AGENT_C_API_KEY = process.env.DIFY_AGENT_C_API_KEY;
+/* ===================== ENV ===================== */
+const {
+  DIFY_API_URL,
+  DIFY_AGENT_A_API_KEY,
+  DIFY_AGENT_B_API_KEY,
+  DIFY_AGENT_C_API_KEY,
+  ROUNDS: ROUNDS_RAW,
+  round: roundsRawLower,
+  SIM_THRESHOLD: SIM_THRESHOLD_RAW,
+  FOLLOWUP_RATIO: FOLLOWUP_RATIO_RAW,
+} = process.env;
 
-// .env에 ROUNDS가 없거나 소문자 round로 적었을 경우도 안전히 처리
-const ROUNDS = Number(process.env.ROUNDS ?? process.env.round ?? 8);
-const SIM_THRESHOLD = Number(process.env.SIM_THRESHOLD || 0.86);
-const FOLLOWUP_RATIO = Number(process.env.FOLLOWUP_RATIO || 0.6);
+// 안전 파싱
+const ROUNDS = Number(ROUNDS_RAW ?? roundsRawLower ?? 8);
+const SIM_THRESHOLD = Number(SIM_THRESHOLD_RAW ?? 0.86);
+const FOLLOWUP_RATIO = Number(FOLLOWUP_RATIO_RAW ?? 0.6);
 
 const ROLES = ['A', 'B', 'C'];
 const AGENT_KEYS = { A: DIFY_AGENT_A_API_KEY, B: DIFY_AGENT_B_API_KEY, C: DIFY_AGENT_C_API_KEY };
 
-// ---- 유틸 ----
+/* ===================== Util ===================== */
 const pickNextRole = (prev) => {
-  const pool = ROLES.filter(r => r !== prev);
+  const pool = ROLES.filter((r) => r !== prev);
   return pool[Math.floor(Math.random() * pool.length)];
 };
 const askedCount = (sessionId) => Message.countDocuments({ sessionId, speaker: 'interviewer' });
@@ -33,12 +39,14 @@ const lastInterviewerRole = async (sessionId) => {
   return last?.interviewerRole || null;
 };
 const recentAskedQuestions = async (sessionId, n = 5) => {
-  const docs = await Message.find({ sessionId, speaker: 'interviewer' }).sort({ createdAt: -1 }).limit(n);
-  return docs.map(d => d.text).reverse();
+  const docs = await Message.find({ sessionId, speaker: 'interviewer' })
+    .sort({ createdAt: -1 })
+    .limit(n);
+  return docs.map((d) => d.text).reverse();
 };
 const sanitize = (s, max = 1500) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 
-// 공통: 노출/스트리밍 헤더 세팅
+// CORS 헤더 노출
 function setExposeHeaders(res) {
   res.setHeader('Access-Control-Expose-Headers', 'interviewer, X-Interview-Ended');
 }
@@ -47,22 +55,22 @@ function setSSEHeaders(res, { role, ended } = {}) {
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
-  // CORS – 라우터 레벨에서 허용(전역 CORS가 있다면 중복돼도 무해)
   res.setHeader('Access-Control-Allow-Origin', '*');
-
   if (role) res.setHeader('interviewer', role);
   if (ended) res.setHeader('X-Interview-Ended', '1');
-
   setExposeHeaders(res);
 }
 
-// -------------------- [1] 면접 시작 --------------------
+/* ===================== [1] 면접 시작 ===================== */
 router.post('/start', async (req, res, next) => {
   try {
+    if (!DIFY_API_URL) {
+      console.warn('[interview] DIFY_API_URL is not set (start will proceed, but chat may fail).');
+    }
+
     await connectMongo();
     try { await ensureSchema(); } catch (e) { console.warn('[ensureSchema] skip:', e.message); }
 
-    // ✅ 기본값 강제 제거, 키 유연 수용 + 필수 검증
     const rawName = (req.user?.name ?? req.body.userName ?? req.body.name ?? '').toString().trim();
     const rawRole = (req.body.jobRole ?? req.body.job ?? '').toString().trim();
 
@@ -70,8 +78,8 @@ router.post('/start', async (req, res, next) => {
       return res.status(400).json({ error: 'userName and jobRole are required' });
     }
 
-    const userId    = (req.user?.id || req.body.userId || null);
-    const userEmail = (req.user?.email || req.body.userEmail || null);
+    const userId = req.user?.id || req.body.userId || null;
+    const userEmail = req.user?.email || req.body.userEmail || null;
 
     const cleanName = rawName.length > 30 ? '지원자' : rawName.replace(/[^가-힣a-zA-Z0-9 _-]/g, '');
 
@@ -79,14 +87,13 @@ router.post('/start', async (req, res, next) => {
       userName: cleanName,
       userId,
       userEmail,
-      jobRole: rawRole,            // ✅ 그대로 저장
-      status: 'ongoing'
+      jobRole: rawRole,
+      status: 'ongoing',
     });
 
     const role = ROLES[Math.floor(Math.random() * ROLES.length)];
     const firstQuestion = `${cleanName}님, 자기소개 부탁드립니다.`;
 
-    // 첫 질문 저장
     const qDoc = await Message.create({
       sessionId: session._id,
       userName: cleanName,
@@ -95,10 +102,9 @@ router.post('/start', async (req, res, next) => {
       speaker: 'interviewer',
       interviewerRole: role,
       turn: 1,
-      text: firstQuestion
+      text: firstQuestion,
     });
 
-    // 벡터 업서트
     try {
       await upsert('QuestionChunk', {
         text: firstQuestion,
@@ -109,104 +115,95 @@ router.post('/start', async (req, res, next) => {
         jobRole: rawRole,
         turn: 1,
         mongoMessageId: String(qDoc._id),
-        interviewerRole: role
+        interviewerRole: role,
       });
     } catch (e) { console.warn('[upsert QuestionChunk] skip:', e.message); }
 
-    // interviewer 헤더 노출
     res.setHeader('interviewer', role);
     setExposeHeaders(res);
 
-    res.json({ sessionId: session._id, interviewer: role, question: firstQuestion, isFirst: true });
-  } catch (e) {
-    next(e);
-  }
+    return res.json({ sessionId: session._id, interviewer: role, question: firstQuestion, isFirst: true });
+  } catch (e) { next(e); }
 });
 
-// -------------------- [2] 후속 질문 (SSE 스트리밍) --------------------
+/* ===================== [2] 후속 질문 (SSE 스트리밍) ===================== */
 router.post('/chat', async (req, res, next) => {
   try {
     const { sessionId, message: userAnswer } = req.body;
-    const userName  = (req.user?.name || req.body.userName || req.body.name || '지원자').toString().trim();
-    let   jobRole   = (req.body.jobRole ?? req.body.job ?? '').toString().trim(); // ✅ 우선 body
+    const userName = (req.user?.name || req.body.userName || req.body.name || '지원자').toString().trim();
+    let jobRole = (req.body.jobRole ?? req.body.job ?? '').toString().trim();
 
     if (!sessionId || !userName || !userAnswer?.trim()) {
       return res.status(422).json({ error: 'sessionId, userName, message는 필수입니다.' });
+    }
+    if (!DIFY_API_URL) {
+      return res.status(500).json({ error: '서버 설정 오류(DIFY_API_URL 미설정)' });
     }
 
     await connectMongo();
     try { await ensureSchema(); } catch (e) { console.warn('[ensureSchema] skip:', e.message); }
 
-    // ✅ 세션에서 jobRole 보강 (프론트 누락 대비)
     if (!jobRole) {
       const sess = await Session.findById(sessionId).lean();
       jobRole = sess?.jobRole || '';
     }
 
-    // 마지막 메시지 조회 (턴 계산용)
     const lastMsg = await Message.findOne({ sessionId }).sort({ createdAt: -1 });
 
-    // 1) 사용자 답변 저장 (+벡터)
     const currentTurn = lastMsg?.turn || 1;
     const aDoc = await Message.create({
       sessionId,
       userName,
-      userId: (req.user?.id || req.body.userId || null),
-      userEmail: (req.user?.email || req.body.userEmail || null),
+      userId: req.user?.id || req.body.userId || null,
+      userEmail: req.user?.email || req.body.userEmail || null,
       speaker: 'user',
-      turn: currentTurn, // 기존 구조 유지
-      text: userAnswer
+      turn: currentTurn,
+      text: userAnswer,
     });
     try {
       await upsert('AnswerChunk', {
         text: userAnswer,
         sessionId: String(sessionId),
         userName,
-        userId: (req.user?.id || req.body.userId || null),
-        userEmail: (req.user?.email || req.body.userEmail || null),
+        userId: req.user?.id || req.body.userId || null,
+        userEmail: req.user?.email || req.body.userEmail || null,
         jobRole,
         turn: currentTurn,
-        mongoMessageId: String(aDoc._id)
+        mongoMessageId: String(aDoc._id),
       });
     } catch (e) { console.warn('[upsert AnswerChunk] skip:', e.message); }
 
-    // 2) 이미 ROUNDS개 질문이 모두 나간 상태라면 → 종료 신호 전송
     const asked = await askedCount(sessionId);
-    if (asked >= ROUNDS) {
-      setSSEHeaders(res, { ended: true }); // X-Interview-Ended: 1 포함
+    if (asked >= (Number.isFinite(ROUNDS) ? ROUNDS : 8)) {
+      setSSEHeaders(res, { ended: true });
       res.write(`data: ${JSON.stringify({ answer: '면접이 종료되었습니다. 참여해 주셔서 감사합니다.' })}\n\n`);
       res.write('data: [DONE]\n\n');
       return res.end();
     }
 
-    // 3) 중복 회피 힌트 + 최근 질문 목록
     let avoidFromVector = [];
     try {
       avoidFromVector = await findSimilarQuestions({
         text: userAnswer, sessionId, userName,
-        userId: (req.user?.id || req.body.userId || null),
-        userEmail: (req.user?.email || req.body.userEmail || null),
-        jobRole, limit: 5
+        userId: req.user?.id || req.body.userId || null,
+        userEmail: req.user?.email || req.body.userEmail || null,
+        jobRole, limit: 5,
       });
-    } catch (e) {
-      console.warn('[findSimilarQuestions] skip:', e.message);
-    }
+    } catch (e) { console.warn('[findSimilarQuestions] skip:', e.message); }
     const avoidHints = avoidFromVector
-      .filter(s => s.similarity >= SIM_THRESHOLD)
-      .map(s => s.text)
+      .filter((s) => s.similarity >= (Number.isFinite(SIM_THRESHOLD) ? SIM_THRESHOLD : 0.86))
+      .map((s) => s.text)
       .slice(0, 3);
 
     const askedQuestions = await recentAskedQuestions(sessionId, 5);
     const askedQuestionsStr = sanitize(askedQuestions.join(' | '), 1500);
 
-    // 4) 모드 결정
-    const mode = Math.random() < FOLLOWUP_RATIO ? 'followup' : 'new_topic';
+    const mode = Math.random() < (Number.isFinite(FOLLOWUP_RATIO) ? FOLLOWUP_RATIO : 0.6) ? 'followup' : 'new_topic';
 
-    // 5) 다음 면접관 선택 + Dify 스트리밍
     const prevRole = await lastInterviewerRole(sessionId);
     const role = pickNextRole(prevRole);
     const apiKey = AGENT_KEYS[role];
-    if (!apiKey) return res.status(400).json({ error: '면접관 API 키 누락' });
+    if (!apiKey) return res.status(500).json({ error: '면접관 API 키 누락' });
 
     const roundNumber = (lastMsg?.turn || 1) + 1;
     const inputs = {
@@ -214,11 +211,9 @@ router.post('/chat', async (req, res, next) => {
       jobRole: sanitize(jobRole, 80),
       asked_questions: askedQuestionsStr,
       recent_answer: sanitize(userAnswer, 1500),
-      round: roundNumber
+      round: roundNumber,
     };
-    if (asked <= 1) {
-      inputs.profile_summary = sanitize(userAnswer, 800);
-    }
+    if (asked <= 1) inputs.profile_summary = sanitize(userAnswer, 800);
 
     const payload = {
       inputs,
@@ -231,10 +226,10 @@ router.post('/chat', async (req, res, next) => {
         '',
         mode === 'followup'
           ? '위 답변을 더 깊게 파고드는 후속 질문을 한 문장으로 만들어라.'
-          : '아직 다루지 않은 역량을 검증할 새로운 질문을 한 문장으로 만들어라.'
+          : '아직 다루지 않은 역량을 검증할 새로운 질문을 한 문장으로 만들어라.',
       ].filter(Boolean).join('\n'),
       response_mode: 'streaming',
-      user: String(sessionId)
+      user: String(sessionId),
     };
 
     const stream = await axios({
@@ -243,24 +238,18 @@ router.post('/chat', async (req, res, next) => {
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       data: payload,
       responseType: 'stream',
-      timeout: 60_000
+      timeout: 60_000,
     });
 
-    // ---- SSE 헤더/하트비트 ----
     setSSEHeaders(res, { role });
     if (res.flushHeaders) res.flushHeaders();
 
-    const hb = setInterval(() => {
-      if (!res.writableEnded) res.write(':\n\n'); // heartbeat
-    }, 25000);
-    req.on('close', () => {
-      clearInterval(hb);
-      try { stream.data.destroy(); } catch {}
-    });
+    const hb = setInterval(() => { if (!res.writableEnded) res.write(':\n\n'); }, 25000);
+    req.on('close', () => { clearInterval(hb); try { stream.data.destroy(); } catch {} });
 
     let fullQuestion = '';
     stream.data.on('data', (chunk) => {
-      const lines = chunk.toString().split('\n').filter(line => line.startsWith('data:'));
+      const lines = chunk.toString().split('\n').filter((line) => line.startsWith('data:'));
       for (const line of lines) {
         const jsonPart = line.replace(/^data:\s*/, '');
         try {
@@ -281,28 +270,28 @@ router.post('/chat', async (req, res, next) => {
         return res.end();
       }
 
-      // 질문 저장 + Weaviate 업서트
+      const nextTurn = (lastMsg?.turn || 1) + 1;
       const qDoc = await Message.create({
         sessionId,
         userName,
-        userId: (req.user?.id || req.body.userId || null),
-        userEmail: (req.user?.email || req.body.userEmail || null),
+        userId: req.user?.id || req.body.userId || null,
+        userEmail: req.user?.email || req.body.userEmail || null,
         speaker: 'interviewer',
         interviewerRole: role,
-        turn: (lastMsg?.turn || 1) + 1,
-        text: safeQuestion
+        turn: nextTurn,
+        text: safeQuestion,
       });
       try {
         await upsert('QuestionChunk', {
           text: safeQuestion,
           sessionId: String(sessionId),
           userName,
-          userId: (req.user?.id || req.body.userId || null),
-          userEmail: (req.user?.email || req.body.userEmail || null),
+          userId: req.user?.id || req.body.userId || null,
+          userEmail: req.user?.email || req.body.userEmail || null,
           jobRole,
-          turn: (lastMsg?.turn || 1) + 1,
+          turn: nextTurn,
           mongoMessageId: String(qDoc._id),
-          interviewerRole: role
+          interviewerRole: role,
         });
       } catch (e) { console.warn('[upsert QuestionChunk] skip:', e.message); }
 
@@ -316,15 +305,14 @@ router.post('/chat', async (req, res, next) => {
       if (!res.headersSent) res.status(502).json({ error: 'Dify 스트림 오류' });
       else try { res.end(); } catch {}
     });
-  } catch (e) {
-    next(e);
-  }
+  } catch (e) { next(e); }
 });
 
-// -------------------- [3] 텍스트 → 음성 --------------------
+/* ===================== [3] 텍스트 → 음성 ===================== */
 router.post('/tts', async (req, res) => {
   try {
     const { text, role = 'DEFAULT' } = req.body;
+    if (!text?.trim()) return res.status(400).json({ error: 'text는 필수입니다.' });
     const audio = await textToSpeech(text, role);
     res.setHeader('Content-Type', 'audio/mpeg');
     res.send(Buffer.from(audio));
@@ -334,7 +322,7 @@ router.post('/tts', async (req, res) => {
   }
 });
 
-// -------------------- [4] 음성 → 텍스트 --------------------
+/* ===================== [4] 음성 → 텍스트 ===================== */
 const upload = multer({ limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB
 router.post('/stt', upload.single('file'), async (req, res) => {
   try {
@@ -348,7 +336,7 @@ router.post('/stt', upload.single('file'), async (req, res) => {
   }
 });
 
-// -------------------- [5] 요약 / 리포트 --------------------
+/* ===================== [5] 요약 / 리포트 ===================== */
 router.get('/summary/:sessionId', async (req, res, next) => {
   try {
     const out = await generateQuickSummary(req.params.sessionId);

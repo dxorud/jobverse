@@ -1,5 +1,6 @@
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const dotenv = require('dotenv');
 const cors = require('cors');
 const morgan = require('morgan');
@@ -9,15 +10,13 @@ dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 const app = express();
 
-// ---- 기본 미들웨어 ----
+/* ===================== 기본 미들웨어 ===================== */
 app.disable('x-powered-by');
-app.use(morgan('dev'));
-
-// JSON / URL-Encoded 파서
+app.use(morgan(process.env.NODE_ENV === 'production' ? 'tiny' : 'dev'));
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
-// CORS 화이트리스트 (ENV로도 덮어쓸 수 있게)
+/* ===================== CORS ===================== */
 const DEFAULT_ORIGINS = [
   'http://localhost:8501',
   'http://127.0.0.1:8501',
@@ -28,79 +27,97 @@ const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || DEFAULT_ORIGINS.join(','))
   .map((s) => s.trim())
   .filter(Boolean);
 
-// 공통 CORS 옵션
 const corsOptions = {
   origin(origin, cb) {
-    if (!origin) return cb(null, true); // curl/서버사이드
+    if (!origin) return cb(null, true); // 서버-서버/로컬 curl 허용
     cb(null, ALLOWED_ORIGINS.includes(origin));
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  // 프론트에서 스트림 헤더 읽게 노출
-  exposedHeaders: ['interviewer', 'X-Interview-Ended'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Range', 'Origin'],
+  exposedHeaders: ['interviewer', 'X-Interview-Ended', 'X-Next-Cursor'],
+  optionsSuccessStatus: 204,
+  preflightContinue: false,
 };
-
 app.use(cors(corsOptions));
-// ❌ 문제 원인: 와일드카드 OPTIONS 라우트 제거
-// app.options('*', cors(corsOptions));
+// '*' 대신 정규식으로 — 일부 환경에서 path-to-regexp 문제 방지
+app.options(/.*/, cors(corsOptions));
 
-// 리버스 프록시(Nginx/ALB) 뒤에 있으면 켜기
+/* 프록시 신뢰 설정 */
 if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
 
-// (선택) 전역적으로 노출 헤더를 다시 한번 보장
+/* 커스텀 헤더 노출 보장 */
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Expose-Headers', 'interviewer, X-Interview-Ended');
+  res.setHeader('Access-Control-Expose-Headers', 'interviewer, X-Interview-Ended, X-Next-Cursor');
   next();
 });
 
-// ---- 헬스체크 ----
-app.get('/healthz', (req, res) => {
+/* ===================== 헬스체크 (앱 루트) ===================== */
+app.get('/healthz', (_req, res) => {
   res.json({ ok: true, ts: Date.now() });
 });
 
-// ---- 라우트 장착 ----
-// API_PREFIX 유효성 검사 + 로깅
-const rawPrefix = process.env.API_PREFIX || ''; // 예: '/api', '', '/v1'
-const looksLikeUrl = /^https?:\/\//i.test(rawPrefix); // 절대 URL 방지
-const isValidPrefix = /^$|^(\/[a-zA-Z0-9._-]+)*$/.test(rawPrefix); // 허용: '', '/', '/api', '/api/v1'
+/* ===================== 라우트 마운트 ===================== */
+const authEnrich = require('./middleware/authEnrich');
+const chatbotRouter = require('./routes/chatbot');
+const interviewRouter = require('./routes/interview');
+const reportsRouter = require('./routes/reports');
 
-// ✅ 빈 문자열/절대 URL/잘못된 패턴이면 무조건 '/'
-const API_PREFIX = (looksLikeUrl || !isValidPrefix) ? '/' : (rawPrefix || '/');
+// /chatbot-api/*  -> chatbotRouter
+app.use('/chatbot-api', chatbotRouter);
 
-if (looksLikeUrl) {
-  console.warn(`[app] API_PREFIX looks like a URL ("${rawPrefix}"). Forcing '/'`);
-}
-if (!isValidPrefix) {
-  console.warn(`[app] Invalid API_PREFIX "${rawPrefix}". Forcing '/'`);
-}
-console.log(`[app] API_PREFIX="${rawPrefix}" -> using "${API_PREFIX}"`);
+// ⚠️ 반드시 reportsRouter를 먼저 마운트!
+// /interview-api/* -> authEnrich -> reportsRouter + interviewRouter
+app.use('/interview-api', authEnrich, reportsRouter);   // /interview-api/report/:id 등
+app.use('/interview-api', authEnrich, interviewRouter); // 면접 진행(start/chat/tts/stt 등)
 
-// routes import / mount 로깅
-let routes;
-try {
-  console.log('[app] importing routes...');
-  routes = require('./routes');
-  console.log('[app] routes imported');
-} catch (e) {
-  console.error('[app] routes import failed:', e);
-  process.exit(1);
-}
+// 보조 헬스
+app.get('/chatbot-api/health', (_req, res) =>
+  res.json({ ok: true, via: 'app.js', ts: Date.now() })
+);
+app.get('/interview-api/health', (_req, res) =>
+  res.json({ ok: true, via: 'app.js', ts: Date.now() })
+);
 
-try {
-  console.log('[app] mounting routes at', API_PREFIX);
-  app.use(API_PREFIX, routes); // 최소 '/' 보장
-  console.log('[app] routes mounted');
-} catch (e) {
-  console.error('[app] app.use() failed while mounting routes:', e);
-  process.exit(1);
-}
+/* ===================== 정적 서빙 (/interview/*) ===================== */
+(() => {
+  const dist = process.env.FRONTEND_DIST
+    ? path.resolve(process.env.FRONTEND_DIST)
+    : path.resolve(__dirname, '../frontend/dist');
 
-// 서버 시작 (EC2/도커 호환 위해 0.0.0.0 권장)
+  const indexHtml = path.join(dist, 'index.html');
+  if (fs.existsSync(indexHtml)) {
+    // vite.config.js의 base('/interview/')와 일치
+    app.use('/interview', express.static(dist, { index: 'index.html', maxAge: '1h' }));
+
+    // SPA 캐치올
+    app.get(['/interview', '/interview/*'], (_req, res) => {
+      res.sendFile(indexHtml);
+    });
+  }
+})();
+
+/* ===================== 404 핸들러 ===================== */
+app.use((req, res) => {
+  res.status(404).json({ error: 'not_found', path: req.path });
+});
+
+/* ===================== 에러 핸들러 ===================== */
+app.use((err, req, res, _next) => {
+  console.error('[ERROR]', err);
+  if (res.headersSent) return;
+  res.status(err.status || 500).json({
+    error: 'internal_error',
+    detail: err?.message,
+    ...(process.env.NODE_ENV === 'development' && { stack: err?.stack }),
+  });
+});
+
+/* ===================== 서버 시작 ===================== */
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 app.listen(PORT, HOST, () => {
-  console.log(`API listening on http://${HOST}:${PORT}${API_PREFIX === '/' ? '' : API_PREFIX}`);
+  console.log(`API listening on http://${HOST}:${PORT}`);
 });
 
 module.exports = app;

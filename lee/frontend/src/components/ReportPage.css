@@ -1,0 +1,287 @@
+/* ====== Theme ====== */
+:root{
+  --bg: #F4F0FF;            /* 연보라 배경 */
+  --card: #FFFFFF;          /* 카드 바탕 */
+  --ink: #1F1B2E;           /* 본문 텍스트 */
+  --muted: #6A6791;         /* 보조 텍스트 */
+  --brand: #6C5CE7;         /* 메인 보라 */
+  --brand-2: #8E7CFF;       /* 보라 라이트 */
+  --chip-bg: #EFEAFF;       /* 칩 배경 */
+  --ok: #22c55e;
+  --warn: #f59e0b;
+  --bad: #ef4444;
+
+  --r: 18px;                /* 둥근 정도 */
+  --shadow: 0 10px 30px rgba(108,92,231,.10);
+}
+
+/* 페이지 바탕 */
+html,body{
+  background: var(--bg);
+  color: var(--ink);
+}
+
+/* ====== page container (가운데 정렬) ====== */
+.rd-wrap{
+  width: min(1200px, 100% - 64px);
+  margin-inline: auto;             /* 가운데 정렬 */
+  padding: 24px 0 72px;
+}
+
+/* PDF 렌더링 시 카드 그림자/여백 완화 */
+.rd-wrap.is-print{
+  width: 100%;
+  padding: 0;
+  box-shadow: none;
+}
+
+/* ====== Header ====== */
+.rd-header{
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin: 8px 0 20px;
+}
+
+.rd-title{
+  margin: 0 0 6px;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+
+.rd-name{
+  font-size: clamp(28px, 3.6vw, 40px);
+  font-weight: 800;
+  color: var(--ink);
+  margin-right: 10px;
+}
+
+/* 직무 pill – 배경과 확실히 분리(흰 배경 + 보라 테두리/그림자) */
+.rd-role-pill{
+  display: inline-block;
+  font-size: 14px;
+  font-weight: 700;
+  color: #5B4EE5;
+  background: #FFFFFF;
+  padding: 8px 12px;
+  border-radius: 999px;
+  transform: translateY(-4px);
+  border: 1px solid rgba(108,92,231,.35);
+  box-shadow: 0 6px 14px rgba(108,92,231,.18);
+}
+
+.rd-dim{
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+/* 오른쪽 점수/등급/버튼 */
+.rd-head-right{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 점수 chip – 진보라 그라디언트(흰 글자)로 대비 강화 */
+.rd-chip{
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: linear-gradient(90deg, #6C5CE7, #8E7CFF);
+  color: #FFFFFF;
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-weight: 700;
+  border: none;
+  box-shadow: 0 6px 16px rgba(108,92,231,.25);
+}
+.rd-chip-num{font-size: 18px; font-weight: 800;}
+.rd-chip-sub{font-size: 12px; opacity: .95;}
+
+.rd-band{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px; height: 34px;
+  border-radius: 10px;
+  font-weight: 800;
+  background: #fff;
+  color: var(--muted);
+  box-shadow: var(--shadow);
+  border: 1px solid rgba(0,0,0,.06); /* 가장자리 살짝 또렷 */
+}
+.rd-band.is-pass{ color:#fff; background: var(--ok); }
+.rd-band.is-border{ color:#fff; background: var(--warn); }
+.rd-band.is-below{ color:#fff; background: var(--bad); }
+
+.rd-btn{
+  background: #fff;
+  color: var(--brand);
+  border: 1px solid rgba(108,92,231,.25);
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-weight: 700;
+  text-decoration: none;
+  box-shadow: var(--shadow);
+}
+.rd-btn.tiny{ padding: 6px 10px; font-size: 12px }
+
+/* ====== Cards / Sections ====== */
+.rd-card{
+  background: var(--card);
+  border-radius: var(--r);
+  box-shadow: var(--shadow);
+  padding: 18px 22px;
+
+  /* spacing: 카드 간격 살짝 줄임 */
+  margin: 14px 0 18px;
+  position: relative;
+  z-index: 0;
+}
+
+/* 히어로(요약) 카드는 살짝 강조 */
+.rd-hero{
+  border: 1px solid rgba(108,92,231,.10);
+}
+
+/* ====== Grid (카드 묶음) ====== */
+.rd-grid{
+  display: grid;
+  gap: 18px;                 /* 기존 22px → 18px */
+  grid-template-columns: 1fr;
+  margin-top: 18px;          /* 기존 22px → 18px */
+  margin-bottom: 18px;       /* 기존 26px → 18px */
+}
+
+/* 인접 블록 간 여백(카드↔그리드) – 겹쳐 보임 방지 */
+.rd-card + .rd-card,
+.rd-grid + .rd-card,
+.rd-card + .rd-grid{
+  margin-top: 18px;          /* 기존 26px → 18px */
+}
+
+/* 넓은 화면에서 3분할 */
+@media (min-width: 980px){
+  .rd-grid.three{
+    grid-template-columns: repeat(3, minmax(0,1fr));
+  }
+}
+
+/* ====== 차트 박스 ====== */
+.rd-chart{
+  height: 260px;          /* ResponsiveContainer 높이 */
+}
+
+/* ====== 스킬 리스트 ====== */
+.rd-skill-list{
+  list-style: none;
+  margin: 0; padding: 0;
+}
+.rd-skill-row{
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px dashed rgba(0,0,0,.06);
+}
+.rd-skill-name{ font-weight: 600; }
+.rd-bar{
+  height: 8px;
+  background: #EFEAFF;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.rd-bar-fill{
+  height: 100%;
+  background: linear-gradient(90deg, var(--brand), var(--brand-2));
+  border-radius: 999px;
+}
+.rd-skill-score{
+  font-feature-settings: "tnum" 1;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ====== 태그 ====== */
+.rd-tags{ display: flex; flex-wrap: wrap; gap: 8px }
+.rd-tag{
+  padding: 6px 10px;
+  background: #fff;
+  border: 1px solid rgba(108,92,231,.15);
+  border-radius: 999px;
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+
+/* ====== 테이블 ====== */
+.rd-table-wrap{ overflow-x: auto }
+.rd-table{
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.rd-table thead th{
+  text-align: left;
+  padding: 10px 8px;
+  color: var(--muted);
+  border-bottom: 1px solid rgba(0,0,0,.08);
+}
+.rd-table tbody td{
+  vertical-align: top;
+  padding: 10px 8px;
+  border-bottom: 1px solid rgba(0,0,0,.05);
+}
+.rd-td-num{
+  width: 60px;
+  text-align: center;
+  font-weight: 700;
+}
+.rd-pre{
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+.rd-td-actions{ min-width: 160px }
+
+/* ====== 상태/기타 ====== */
+.rd-error{
+  color: var(--bad);
+  background: #fff;
+  border: 1px solid rgba(239,68,68,.2);
+  padding: 12px 16px;
+  border-radius: 12px;
+}
+.center{text-align:center}
+
+/* 스켈레톤 */
+.rd-skeleton{
+  height: 120px;
+  border-radius: var(--r);
+  background: linear-gradient(90deg, rgba(255,255,255,.6), rgba(255,255,255,.9), rgba(255,255,255,.6));
+  animation: pulse 1.3s infinite linear;
+  box-shadow: var(--shadow);
+  margin-bottom: 12px;
+}
+.rd-skeleton.small{ height: 70px }
+.rd-skeleton.tall{ height: 300px }
+@keyframes pulse{
+  from{ filter: brightness(98%); }
+  50%{ filter: brightness(104%); }
+  to{ filter: brightness(98%); }
+}
+
+/* ====== Footer ====== */
+.rd-foot{
+  margin-top: 28px;
+  color: var(--muted);
+  font-size: 13px;
+  display: flex;
+  gap: 16px;
+}
+
+/* 모바일 여백 조금 더 */
+@media (max-width: 480px){
+  .rd-wrap{ width: min(1200px, 100% - 32px); }
+}

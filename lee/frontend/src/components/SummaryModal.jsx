@@ -1,38 +1,36 @@
 import React, { useEffect, useState, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import './SummaryModal.css';
 
 export default function SummaryModal({
   open = false,
   sessionId,
   onClose,
-  onMore,           // 리포트 페이지로 이동
-  baseUrl = '',     // 예: import.meta.env.VITE_API_BASE || 'http://localhost:3000'
-  authHeaders       // 예: { Authorization: 'Bearer ...' }
+  onMore,
+  moreTo = '/report',
+  baseUrl = '',
+  authHeaders
 }) {
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState('');
   const [bullets, setBullets] = useState([]);
   const [error, setError] = useState('');
 
-  // 포커스 관리용
+  const navigate = useNavigate();
   const boxRef = useRef(null);
   const firstBtnRef = useRef(null);
   const lastBtnRef = useRef(null);
 
-  // 모달 열릴 때 박스에 포커스
   useEffect(() => {
     if (!open) return;
-    requestAnimationFrame(() => {
-      if (boxRef.current?.focus) boxRef.current.focus();
-    });
+    requestAnimationFrame(() => boxRef.current?.focus?.());
   }, [open]);
 
-  // 요약 가져오기 (authHeaders는 의존성에서 제외)
   useEffect(() => {
     if (!open || !sessionId) return;
 
     const ctrl = new AbortController();
-    const signal = ctrl.signal;
+    const { signal } = ctrl;
 
     setLoading(true);
     setError('');
@@ -40,13 +38,13 @@ export default function SummaryModal({
     setBullets([]);
 
     const apiBase = (baseUrl || '').replace(/\/+$/, '');
-    const url = `${apiBase}/interview/summary/${encodeURIComponent(sessionId)}`;
+    const url = `${apiBase}/summary/${encodeURIComponent(sessionId)}`;
 
     fetch(url, { headers: { ...(authHeaders || {}) }, signal })
       .then(async (r) => {
         if (!r.ok) {
           const txt = await r.text().catch(() => '');
-          throw new Error(txt || '요약 API 실패');
+          throw new Error(txt || `요약 API 실패 (HTTP ${r.status})`);
         }
         return r.json();
       })
@@ -63,9 +61,8 @@ export default function SummaryModal({
       });
 
     return () => ctrl.abort();
-  }, [open, sessionId, baseUrl]);
+  }, [open, sessionId, baseUrl, authHeaders]);
 
-  // 전역 ESC
   useEffect(() => {
     if (!open) return;
     const onKey = (e) => e.key === 'Escape' && onClose?.();
@@ -75,7 +72,6 @@ export default function SummaryModal({
 
   if (!open) return null;
 
-  // 포커스 트랩(Shift+Tab / Tab)
   const onKeyDownTrap = (e) => {
     if (e.key !== 'Tab') return;
     const first = firstBtnRef.current;
@@ -83,16 +79,52 @@ export default function SummaryModal({
     if (!first || !last) return;
 
     if (e.shiftKey) {
-      // 뒤로 이동 중, 첫 요소에서 더 뒤로 못 가게
       if (document.activeElement === first) {
         e.preventDefault();
         last.focus();
       }
     } else {
-      // 앞으로 이동 중, 마지막 요소에서 더 앞으로 못 가게
       if (document.activeElement === last) {
         e.preventDefault();
         first.focus();
+      }
+    }
+  };
+
+  // (유틸) '/report' 형태 보장
+  const ensurePath = (p) => (p?.startsWith('/') ? p : `/${p || ''}`);
+
+  // ✅ 더 알아보기: 목록 페이지로 이동 + sessionId state 전달 + 폴백
+  const handleMore = (e) => {
+    e?.preventDefault?.();
+    if (loading) return;
+
+    const target = ensurePath(moreTo || '/report');
+
+    try {
+      if (typeof onMore === 'function') onMore();
+    } catch {
+      // onMore 내부 에러는 네비게이션을 막지 않음
+    }
+
+    try {
+      navigate(target, { state: { from: 'summary', sessionId } });
+    } catch {
+      // 라우터 컨텍스트 밖(포털/별도 루트)일 때 하드 네비게이션
+      window.location.href = target;
+    }
+
+    onClose?.();
+  };
+
+  // ⌨️ 모달 안에서 Enter 누르면(버튼/입력요소 제외) 더 알아보기 실행
+  const handleKeyDown = (e) => {
+    onKeyDownTrap(e);
+    if (e.key === 'Enter' && !loading && !error) {
+      const tag = (e.target.tagName || '').toLowerCase();
+      const interactive = ['a', 'button', 'input', 'textarea', 'select'];
+      if (!interactive.includes(tag)) {
+        handleMore(e);
       }
     }
   };
@@ -103,14 +135,15 @@ export default function SummaryModal({
       role="dialog"
       aria-modal="true"
       aria-labelledby="summary-title"
-      onClick={onClose}                 // 배경 클릭 닫기
+      onClick={onClose}
     >
       <div
         ref={boxRef}
         className="summary-box"
-        onClick={(e) => e.stopPropagation()} // 내부 클릭 전파 방지
-        tabIndex={-1}                        // 컨테이너 포커스 가능 (outline은 CSS로 숨김)
-        onKeyDown={onKeyDownTrap}
+        onClick={(e) => e.stopPropagation()}
+        tabIndex={-1}
+        onKeyDown={handleKeyDown}
+        aria-busy={loading ? 'true' : 'false'}
       >
         {/* 헤더 */}
         <div className="summary-header">
@@ -151,8 +184,8 @@ export default function SummaryModal({
           <button
             type="button"
             className="summary-btn summary-btn--primary"
-            onClick={onMore}
-            disabled={loading || !!error}
+            onClick={handleMore}
+            disabled={loading}
             title={loading ? '분석 중입니다' : undefined}
             ref={lastBtnRef}
           >
